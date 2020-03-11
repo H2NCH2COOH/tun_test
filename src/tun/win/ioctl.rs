@@ -1,10 +1,10 @@
 use std::mem::transmute;
 use winapi::shared::minwindef::DWORD;
-use winapi::um::winioctl::{CTL_CODE, FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED};
+use winapi::um::winioctl::{CTL_CODE, FILE_ANY_ACCESS, FILE_DEVICE_NETWORK, METHOD_BUFFERED};
 use winapi::um::winnt::HANDLE;
 
 fn tap_win_ctrl_code(request: DWORD, method: DWORD) -> DWORD {
-    CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_NETWORK, request, method, FILE_ANY_ACCESS)
 }
 
 fn ioctl(
@@ -46,8 +46,6 @@ fn ioctl(
             null_mut(),
         )
     };
-
-    println!("{:?}", err);
 
     if (err as u32) != ERROR_SUCCESS {
         Err(err as u32)
@@ -150,8 +148,6 @@ pub fn config_dhcp_msaq(
         None,
     )
 }
-
-pub const DHCP_USER_SUPPLIED_OPTIONS_BUFFER_SIZE: usize = 256;
 
 pub fn config_dhcp_set_opt(handle: HANDLE, option: &[u8]) -> Result<(), u32> {
     ioctl(
