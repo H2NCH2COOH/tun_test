@@ -10,4 +10,6 @@ fn main() {
         1300,
     )
     .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(10));
 }
