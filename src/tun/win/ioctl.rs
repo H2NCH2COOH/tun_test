@@ -54,6 +54,7 @@ fn ioctl(
     }
 }
 
+#[allow(dead_code)]
 pub fn get_mac(handle: HANDLE) -> Result<[u8; 6], u32> {
     let mut mac: [u8; 6] = [0; 6];
     ioctl(
@@ -72,6 +73,7 @@ pub struct Version {
     dbg: u32,
 }
 
+#[allow(dead_code)]
 pub fn get_version(handle: HANDLE) -> Result<Version, u32> {
     let mut output: [u8; 12] = [0; 12];
     ioctl(
@@ -90,6 +92,7 @@ pub fn get_version(handle: HANDLE) -> Result<Version, u32> {
     })
 }
 
+#[allow(dead_code)]
 pub fn get_mtu(handle: HANDLE) -> Result<u32, u32> {
     let mut output: [u8; 4] = [0; 4];
     ioctl(
@@ -101,6 +104,7 @@ pub fn get_mtu(handle: HANDLE) -> Result<u32, u32> {
     .map(|_| unsafe { transmute::<[u8; 4], u32>(output) })
 }
 
+#[allow(dead_code)]
 pub fn config_tun(
     handle: HANDLE,
     local_ip: u32,
@@ -117,6 +121,7 @@ pub fn config_tun(
     )
 }
 
+#[allow(dead_code)]
 pub fn config_point_to_point(
     handle: HANDLE,
     local_ip: u32,
@@ -132,6 +137,7 @@ pub fn config_point_to_point(
     )
 }
 
+#[allow(dead_code)]
 pub fn config_dhcp_msaq(
     handle: HANDLE,
     dhcp_addr: u32,
@@ -149,6 +155,7 @@ pub fn config_dhcp_msaq(
     )
 }
 
+#[allow(dead_code)]
 pub fn config_dhcp_set_opt(handle: HANDLE, option: &[u8]) -> Result<(), u32> {
     ioctl(
         handle,
@@ -158,6 +165,7 @@ pub fn config_dhcp_set_opt(handle: HANDLE, option: &[u8]) -> Result<(), u32> {
     )
 }
 
+#[allow(dead_code)]
 pub fn get_info(handle: HANDLE) -> Result<String, u32> {
     let mut output: [u8; 1024] = [0; 1024];
     ioctl(
@@ -169,6 +177,7 @@ pub fn get_info(handle: HANDLE) -> Result<String, u32> {
     .map(|_| String::from_utf8(output.to_vec()).unwrap())
 }
 
+#[allow(dead_code)]
 pub fn set_media_status(handle: HANDLE, status: bool) -> Result<(), u32> {
     let input: u32 = status as u32;
     let input = unsafe { transmute::<u32, [u8; 4]>(input) };
@@ -180,11 +189,16 @@ pub fn set_media_status(handle: HANDLE, status: bool) -> Result<(), u32> {
     )
 }
 
+#[allow(dead_code)]
 pub const PRIORITY_BEHAVIOR_NOPRIORITY: u32 = 0;
+#[allow(dead_code)]
 pub const PRIORITY_BEHAVIOR_ENABLED: u32 = 1;
+#[allow(dead_code)]
 pub const PRIORITY_BEHAVIOR_ADDALWAYS: u32 = 2;
+#[allow(dead_code)]
 pub const PRIORITY_BEHAVIOR_MAX: u32 = 2;
 
+#[allow(dead_code)]
 pub fn priority_behavior(handle: HANDLE, behavior: u32) -> Result<(), u32> {
     let input = unsafe { transmute::<u32, [u8; 4]>(behavior) };
     ioctl(
