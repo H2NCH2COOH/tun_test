@@ -1,10 +1,10 @@
 use std::mem::transmute;
 use winapi::shared::minwindef::DWORD;
-use winapi::um::winioctl::{CTL_CODE, FILE_ANY_ACCESS, FILE_DEVICE_NETWORK, METHOD_BUFFERED};
+use winapi::um::winioctl::{CTL_CODE, FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED};
 use winapi::um::winnt::HANDLE;
 
 fn tap_win_ctrl_code(request: DWORD, method: DWORD) -> DWORD {
-    CTL_CODE(FILE_DEVICE_NETWORK, request, method, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 }
 
 fn ioctl(
@@ -15,7 +15,7 @@ fn ioctl(
 ) -> Result<(), u32> {
     use std::ffi::c_void;
     use std::ptr::null_mut;
-    use winapi::shared::winerror::*;
+    use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::ioapiset::DeviceIoControl;
 
     let mut input_ptr: *mut c_void = null_mut();
@@ -33,9 +33,8 @@ fn ioctl(
     }
 
     let mut output_ret_len: DWORD = 0;
-
-    let err = unsafe {
-        DeviceIoControl(
+    unsafe {
+        if DeviceIoControl(
             handle,
             ctrl,
             input_ptr,
@@ -44,13 +43,12 @@ fn ioctl(
             output_len,
             &mut output_ret_len,
             null_mut(),
-        )
-    };
-
-    if (err as u32) != ERROR_SUCCESS {
-        Err(err as u32)
-    } else {
-        Ok(())
+        ) == 0
+        {
+            Err(GetLastError() as u32)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -179,7 +177,7 @@ pub fn get_info(handle: HANDLE) -> Result<String, u32> {
 
 #[allow(dead_code)]
 pub fn set_media_status(handle: HANDLE, status: bool) -> Result<(), u32> {
-    let input: u32 = status as u32;
+    let input: u32 = if status { 1 } else { 0 };
     let input = unsafe { transmute::<u32, [u8; 4]>(input) };
     ioctl(
         handle,

@@ -1,9 +1,12 @@
 mod ioctl;
+mod utils;
 
 use std::ffi::CString;
 use std::net::UdpSocket;
 use std::string::String;
 use winapi::um::winnt::HANDLE;
+
+use utils::{strerror, CanSend, get_tun_guid, Handle};
 
 /// The TUN interface to use
 ///
@@ -27,80 +30,12 @@ pub struct Tun {
     sock: Option<UdpSocket>,
 }
 
-fn strerror(errno: u32) -> String {
-    let mut buff: [i8; 1024] = [0; 1024];
-    unsafe {
-        use std::ptr::null_mut;
-        use winapi::um::winbase::FormatMessageA;
-        use winapi::um::winbase::FORMAT_MESSAGE_FROM_SYSTEM;
-
-        FormatMessageA(
-            FORMAT_MESSAGE_FROM_SYSTEM,
-            null_mut(),
-            errno,
-            0,
-            buff.as_mut_ptr(),
-            1024,
-            null_mut(),
-        );
-    }
-    String::from_utf8(
-        buff.iter()
-            .take_while(|&&b| b != 0)
-            .map(|&b| b as u8)
-            .collect(),
-    )
-    .unwrap_or(format!("Failed to format error: {}", errno))
-}
-
 fn parse_packet<'a>(buf: &'a [u8]) -> Result<&'a [u8], String> {
-    Err("XXX".to_string())
+    Ok(&buf[0..1])
 }
 
 fn send_packet(sock: &UdpSocket, pkt: Result<&[u8], String>) -> Result<(), String> {
-    Err("XXX".to_string())
-}
-
-struct CanSend<T>(T);
-unsafe impl<T> Send for CanSend<T> {}
-
-struct Handle {
-    hdl: HANDLE,
-    taken: bool,
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        use winapi::um::handleapi::CloseHandle;
-
-        if !self.taken {
-            unsafe {
-                CloseHandle(self.take());
-            }
-        }
-    }
-}
-
-impl Handle {
-    fn new(h: HANDLE) -> Handle {
-        Handle {
-            hdl: h,
-            taken: false,
-        }
-    }
-
-    fn get(&self) -> HANDLE {
-        self.hdl
-    }
-
-    fn take(&mut self) -> HANDLE {
-        use winapi::um::handleapi::INVALID_HANDLE_VALUE;
-
-        let hdl = self.hdl;
-        self.hdl = INVALID_HANDLE_VALUE;
-        self.taken = true;
-        hdl
-    }
+    Ok(())
 }
 
 fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
@@ -152,144 +87,65 @@ fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
         let mut sock_overlapped: OVERLAPPED;
         let mut sock_buf: [u8; 2000] = [0; 2000];
 
-        let read_from_tun = |buf: &[u8], len| -> bool {
-            match parse_packet(&buf[0 .. len]) {
-                Ok(p) => {
-                    if p.len() > mtu {
-                        // Drop or ICMP
-                        //TODO
-                    } else {
-                        send_packet(&sock, Ok(p)).unwrap();
-                    }
-                    true
-                }
-                Err(_) => false,
-            }
-        };
-
-        let read_from_sock = |buf: &[u8], len| -> bool {
-            match parse_packet(&buf[0..len]) {
-                Ok(p) => {
-                    if p.len() > mtu {
-                        // Drop this packet
-                        // TODO: Introduce nonfatal error?
-                    }
-                    let mut len: DWORD = 0;
-                    // TODO: Async write
-                    if WriteFile(
-                        tun_hdl.get(),
-                        p.as_ptr() as *const c_void,
-                        p.len() as u32,
-                        &mut len,
-                        null_mut(),
-                    ) == 0
-                    {
-                        send_packet(
-                            &sock,
-                            Err(format!(
-                                "Failed to send packet to TUN with error: {}",
-                                strerror(GetLastError())
-                            )),
-                        )
-                        .unwrap();
-                        false
-                    } else if len != p.len() as u32 {
-                        send_packet(
-                            &sock,
-                            Err(format!(
-                                "Failed to send packet to TUN with bad length: {}/{}",
-                                len,
-                                p.len()
-                            )),
-                        )
-                        .unwrap();
-                        false
-                    } else {
-                        true
-                    }
-                }
-                Err(_) => false,
-            }
-        };
-
+        let mut tun_reading = false;
+        let mut sock_reading = false;
         loop {
-            let mut pending = 0;
-            loop {
-                let mut len: DWORD = 0;
+            if !tun_reading {
                 tun_overlapped = std::mem::zeroed();
                 if ReadFile(
                     tun_hdl.get(),
                     tun_buf.as_mut_ptr() as *mut c_void,
                     tun_buf.len() as u32,
-                    &mut len,
+                    null_mut(),
                     &mut tun_overlapped,
-                ) == 0
+                ) != 0
                 {
-                    let err = GetLastError();
-                    if err != ERROR_IO_PENDING {
-                        send_packet(
-                            &sock,
-                            Err(format!(
-                                "Failed to read packet from TUN with error: {}",
-                                strerror(err)
-                            )),
-                        )
-                        .unwrap();
-                        return;
-                    }
-
-                    // Read pending
-                    pending += 1;
-                    break;
-                } else if len == 0 {
-                    send_packet(&sock, Err("Empty read from TUN".to_string())).unwrap();
-                    return;
-                } else {
-                    if !read_from_tun(&tun_buf, len as usize) {
-                        return;
-                    }
+                    assert!(false);
                 }
+                let err = GetLastError();
+                if err != ERROR_IO_PENDING {
+                    send_packet(
+                        &sock,
+                        Err(format!(
+                            "Failed to read packet from TUN with error: {}",
+                            strerror(err)
+                        )),
+                    )
+                    .unwrap();
+                    return;
+                }
+                tun_reading = true;
             }
 
-            loop {
-                let mut len: DWORD = 0;
+            if !sock_reading {
                 sock_overlapped = std::mem::zeroed();
                 if ReadFile(
                     sock_hdl,
                     sock_buf.as_mut_ptr() as *mut c_void,
                     sock_buf.len() as u32,
-                    &mut len,
+                    null_mut(),
                     &mut sock_overlapped,
-                ) == 0
+                ) != 0
                 {
-                    let err = GetLastError();
-                    if err != ERROR_IO_PENDING {
-                        send_packet(
-                            &sock,
-                            Err(format!(
-                                "Failed to read packet from UDP socket with error: {}",
-                                strerror(err)
-                            )),
-                        )
-                        .unwrap();
-                        return;
-                    }
-
-                    // Read pending
-                    pending += 1;
-                    break;
-                } else if len == 0 {
-                    send_packet(&sock, Err("Empty packet from UDP socket".to_string())).unwrap();
-                    return;
-                } else {
-                    if !read_from_sock(&sock_buf, len as usize) {
-                        return;
-                    }
+                    assert!(false);
                 }
+                let err = GetLastError();
+                if err != ERROR_IO_PENDING {
+                    send_packet(
+                        &sock,
+                        Err(format!(
+                            "Failed to read packet from UDP socket with error: {}",
+                            strerror(err)
+                        )),
+                    )
+                    .unwrap();
+                    return;
+                }
+                sock_reading = true;
             }
 
             // IOCP wait
-            while pending > 0 {
+            if tun_reading || sock_reading {
                 let mut len: DWORD = 0;
                 let mut key: usize = 0;
                 let mut olp: *mut OVERLAPPED = null_mut();
@@ -308,16 +164,63 @@ fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
                 }
 
                 if key == 0 {
-                    if !read_from_tun(&tun_buf, len as usize) {
-                        return;
+                    tun_reading = false;
+                    match parse_packet(&tun_buf[0..len as usize]) {
+                        Ok(p) => {
+                            if let Ok(pkt) = packet::ip::Packet::new(p) {
+                                println!("Received packet: {:?}", pkt);
+                            }
+                            if p.len() > mtu {
+                                // TODO: Drop or ICMP
+                            } else {
+                                send_packet(&sock, Ok(p)).unwrap();
+                            }
+                        }
+                        Err(_) => return,
                     }
                 } else {
-                    if !read_from_sock(&sock_buf, len as usize) {
-                        return;
+                    sock_reading = false;
+                    match parse_packet(&sock_buf[0..len as usize]) {
+                        Ok(p) => {
+                            if p.len() > mtu {
+                                // Drop this packet
+                                // TODO: Introduce nonfatal error?
+                            }
+                            let mut len: DWORD = 0;
+                            // TODO: Async write
+                            if WriteFile(
+                                tun_hdl.get(),
+                                p.as_ptr() as *const c_void,
+                                p.len() as u32,
+                                &mut len,
+                                null_mut(),
+                            ) == 0
+                            {
+                                send_packet(
+                                    &sock,
+                                    Err(format!(
+                                        "Failed to send packet to TUN with error: {}",
+                                        strerror(GetLastError())
+                                    )),
+                                )
+                                .unwrap();
+                                return;
+                            } else if len != p.len() as u32 {
+                                send_packet(
+                                    &sock,
+                                    Err(format!(
+                                        "Failed to send packet to TUN with bad length: {}/{}",
+                                        len,
+                                        p.len()
+                                    )),
+                                )
+                                .unwrap();
+                                return;
+                            }
+                        }
+                        Err(_) => return,
                     }
                 }
-
-                pending -= 1;
             }
         }
     }
@@ -352,7 +255,9 @@ impl Tun {
             return Err(format!("Invalid MTU: {}", mtu));
         }
 
-        let path = CString::new(format!("\\\\.\\Global\\{}.tap", name)).unwrap();
+        let guid = get_tun_guid(name)?;
+
+        let path = CString::new(format!("\\\\.\\Global\\{}.tap", guid)).unwrap();
         let mut handle = unsafe {
             use std::ptr::null_mut;
             use winapi::um::errhandlingapi::GetLastError;
@@ -390,8 +295,13 @@ impl Tun {
             ));
         }
 
-        let addr = u32::from(addr);
-        let mask: u32 = (((1u64 << prefix_len) - 1) << (32 - prefix_len)) as u32;
+        // Addr and mask in small-end
+        let addr = addr.octets();
+        let addr = (addr[0] as u32)
+            | ((addr[1] as u32) << 8)
+            | ((addr[2] as u32) << 16)
+            | ((addr[3] as u32) << 24);
+        let mask = ((1u64 << prefix_len) - 1) as u32;
         if let Err(err) = ioctl::config_tun(handle.get(), addr, addr & mask, mask) {
             return Err(format!(
                 "Failed to config TUN with error: {}",
