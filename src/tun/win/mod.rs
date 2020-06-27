@@ -1,4 +1,6 @@
+#[doc(hidden)]
 mod ioctl;
+#[doc(hidden)]
 mod utils;
 
 use std::ffi::CString;
@@ -6,7 +8,7 @@ use std::net::UdpSocket;
 use std::string::String;
 use winapi::um::winnt::HANDLE;
 
-use utils::{strerror, CanSend, get_tun_guid, Handle};
+use utils::{get_tun_guid, strerror, CanSend, Handle};
 
 /// The TUN interface to use
 ///
@@ -22,22 +24,26 @@ use utils::{strerror, CanSend, get_tun_guid, Handle};
 ///
 /// The following work around is created:
 /// * Create two UDP sockets
+/// * Connect them to each other
 /// * Start a new thread
-/// * On the new thread, connect the TUN handle and one of the sockets
+/// * On the new thread, splice the TUN handle and one of the sockets
 /// * Register the other socket to wepoll
 ///
 pub struct Tun {
     sock: Option<UdpSocket>,
 }
 
+#[doc(hidden)]
 fn parse_packet<'a>(buf: &'a [u8]) -> Result<&'a [u8], String> {
     Ok(&buf[0..1])
 }
 
+#[doc(hidden)]
 fn send_packet(sock: &UdpSocket, pkt: Result<&[u8], String>) -> Result<(), String> {
     Ok(())
 }
 
+#[doc(hidden)]
 fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
     unsafe {
         use std::ffi::c_void;
@@ -165,18 +171,18 @@ fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
 
                 if key == 0 {
                     tun_reading = false;
-                    match parse_packet(&tun_buf[0..len as usize]) {
-                        Ok(p) => {
-                            if let Ok(pkt) = packet::ip::Packet::new(p) {
-                                println!("Received packet: {:?}", pkt);
-                            }
-                            if p.len() > mtu {
-                                // TODO: Drop or ICMP
-                            } else {
-                                send_packet(&sock, Ok(p)).unwrap();
-                            }
-                        }
-                        Err(_) => return,
+                    let p = &tun_buf[0..len as usize];
+                    println!("Received packet: {:?}", p);
+                    if let Ok(pkt) = packet::ip::Packet::new(p) {
+                        println!("Received IP packet: {:?}", pkt);
+                    } else if let Ok(pkt) = packet::icmp::Packet::new(p) {
+                        println!("Received ICMP packet: {:?}", pkt);
+                    }
+
+                    if p.len() > mtu {
+                        // TODO: Drop or ICMP
+                    } else {
+                        send_packet(&sock, Ok(p)).unwrap();
                     }
                 } else {
                     sock_reading = false;
@@ -296,16 +302,44 @@ impl Tun {
         }
 
         // Addr and mask in small-end
-        let addr = addr.octets();
-        let addr = (addr[0] as u32)
-            | ((addr[1] as u32) << 8)
-            | ((addr[2] as u32) << 16)
-            | ((addr[3] as u32) << 24);
+        let addrv = addr.octets();
+        let addri = (addrv[0] as u32)
+            | ((addrv[1] as u32) << 8)
+            | ((addrv[2] as u32) << 16)
+            | ((addrv[3] as u32) << 24);
         let mask = ((1u64 << prefix_len) - 1) as u32;
-        if let Err(err) = ioctl::config_tun(handle.get(), addr, addr & mask, mask) {
+        if let Err(err) = ioctl::config_tun(handle.get(), addri, addri & mask, mask) {
             return Err(format!(
                 "Failed to config TUN with error: {}",
                 strerror(err)
+            ));
+        }
+
+        let output = std::process::Command::new("netsh")
+            .arg("interface")
+            .arg("ip")
+            .arg("set")
+            .arg("address")
+            .arg(name)
+            .arg("static")
+            .arg(addr.to_string())
+            .arg(
+                std::net::Ipv4Addr::from(((1u32 << prefix_len) - 1) << (32 - prefix_len))
+                    .to_string(),
+            )
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to execute netsh command to set TUN interface address with error: {}",
+                    e
+                )
+            })?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to execute netsh command to set TUN interface address with output: {}",
+                String::from_utf8(output.stderr)
+                    .unwrap_or_else(|e| format!("OUTPUT NOT UTF-8: {}", e))
             ));
         }
 

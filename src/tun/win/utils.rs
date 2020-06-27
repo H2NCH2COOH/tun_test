@@ -77,14 +77,14 @@ pub fn get_tun_guid(name: &str) -> Result<String, String> {
         use winapi::um::winnt::*;
         use winapi::um::winreg::*;
 
-        let LIST_KEY = CString::new(
+        let list_key = CString::new(
             "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}",
         )
         .unwrap();
         let mut list = HKEY_LOCAL_MACHINE;
         let err = RegOpenKeyExA(
             HKEY_LOCAL_MACHINE,
-            LIST_KEY.as_ptr(),
+            list_key.as_ptr(),
             0,
             KEY_READ,
             &mut list,
@@ -131,7 +131,7 @@ pub fn get_tun_guid(name: &str) -> Result<String, String> {
                 .take_while(|&&i| i != 0)
                 .map(|&i| i as u8)
                 .collect();
-            let mut key: Vec<i8> = LIST_KEY.to_bytes().iter().map(|&i| i as i8).collect();
+            let mut key: Vec<i8> = list_key.to_bytes().iter().map(|&i| i as i8).collect();
             key.push(92); // '\'
             key.extend(guid_vec.iter().map(|&i| i as i8));
             key.extend("\\Connection".as_bytes().iter().map(|&i| i as i8));
@@ -169,11 +169,11 @@ pub fn get_tun_guid(name: &str) -> Result<String, String> {
                 hkey,
                 {
                     let mut v: Vec<u16> = Vec::with_capacity(5);
-                    v.push(78);  // N
-                    v.push(97);  // a
+                    v.push(78); // N
+                    v.push(97); // a
                     v.push(109); // m
                     v.push(101); // e
-                    v.push(0);   // NUL
+                    v.push(0); // NUL
                     v
                 }
                 .as_ptr(),
