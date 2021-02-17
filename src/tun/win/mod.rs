@@ -1,4 +1,6 @@
 #[doc(hidden)]
+mod iocp;
+#[doc(hidden)]
 mod ioctl;
 #[doc(hidden)]
 mod utils;
@@ -173,11 +175,13 @@ fn worker_main(tun_hdl: CanSend<HANDLE>, mtu: usize, sock: UdpSocket) {
                     tun_reading = false;
                     let p = &tun_buf[0..len as usize];
                     println!("Received packet: {:?}", p);
+                    /*
                     if let Ok(pkt) = packet::ip::Packet::new(p) {
                         println!("Received IP packet: {:?}", pkt);
                     } else if let Ok(pkt) = packet::icmp::Packet::new(p) {
                         println!("Received ICMP packet: {:?}", pkt);
                     }
+                    */
 
                     if p.len() > mtu {
                         // TODO: Drop or ICMP
@@ -258,7 +262,7 @@ impl Tun {
         }
 
         if mtu > 1500 {
-            return Err(format!("Invalid MTU: {}", mtu));
+            return Err(format!("MTU too large: {}", mtu));
         }
 
         let guid = get_tun_guid(name)?;
