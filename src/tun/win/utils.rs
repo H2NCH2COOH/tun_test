@@ -1,5 +1,10 @@
 use winapi::um::winnt::HANDLE;
 
+pub fn last_error() -> u32 {
+    use winapi::um::errhandlingapi::GetLastError;
+    unsafe { GetLastError() }
+}
+
 pub fn strerror(errno: u32) -> String {
     let mut buff: [i8; 1024] = [0; 1024];
     unsafe {
