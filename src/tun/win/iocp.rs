@@ -1,11 +1,13 @@
 use super::utils::{last_error, strerror};
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::panic;
 use std::pin::Pin;
-use std::rc::Rc;
-use std::sync::Mutex;
+use std::rc::{Rc, Weak};
 use std::task::Context;
 use std::task::Poll;
 use std::task::{RawWaker, RawWakerVTable, Waker};
@@ -13,22 +15,27 @@ use winapi::shared::minwindef::DWORD;
 use winapi::shared::ntdef::ULONG;
 use winapi::um::minwinbase::OVERLAPPED;
 use winapi::um::winnt::HANDLE;
-use std::collections::HashMap;
 
-pub struct IOCPState<'a> {
-    next_handle_id: ULONG,
-    pending_tasks: VecDeque<Rc<Task<'a>>>,
-    ongoing_ios: HashMap<*const OVERLAPPED, Waker>,
+struct Task {
+    fut: Pin<Box<dyn Future<Output = ()>>>,
+    queue: Rc<TaskQueue>,
 }
 
-pub struct IOCP<'a> {
+pub struct TaskQueue {
+    queue: RefCell<VecDeque<Task>>,
+}
+
+pub struct IOCP {
     handle: HANDLE,
-    state: Mutex<IOCPState<'a>>,
+    next_handle_id: Cell<ULONG>,
+    pending_tasks: TaskQueue,
+    ongoing_ios: RefCell<HashMap<*const OVERLAPPED, (*const IOState, Waker)>>,
 }
 
-struct Task<'a> {
-    future: Pin<Box<dyn Future<Output = ()> + 'a>>,
-    iocp: &'a IOCP<'a>,
+pub struct AsyncHandle<'handle> {
+    handle: HANDLE,
+    id: ULONG,
+    iocp: &'handle IOCP,
 }
 
 enum IOState {
@@ -37,50 +44,61 @@ enum IOState {
     Finished(Result<usize, String>),
 }
 
-struct IOContext<'b, 'a>
+struct IOContext<'io, 'handle>
 where
-    'a: 'b,
+    'handle: 'io,
 {
-    handle: &'b AsyncHandle<'a>,
+    handle: &'io AsyncHandle<'handle>,
     overlapped: OVERLAPPED,
     state: IOState,
 }
 
-struct ReadContext<'b, 'a>
-where
-    'a: 'b,
-{
-    io: IOContext<'b, 'a>,
-    buf: &'b mut [u8],
+struct ReadContext<'io, 'handle> {
+    io: IOContext<'io, 'handle>,
+    buf: &'io mut [u8],
 }
 
-struct ReadFuture<'b, 'a>
-where
-    'a: 'b,
-{
-    ctx: Pin<&'b mut ReadContext<'b, 'a>>,
+struct ReadFuture<'io, 'handle> {
+    ctx: Pin<&'io mut ReadContext<'io, 'handle>>,
 }
 
-pub struct AsyncHandle<'a> {
-    handle: HANDLE,
-    id: ULONG,
-    iocp: &'a IOCP<'a>,
+impl TaskQueue {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            queue: RefCell::new(VecDeque::new()),
+        })
+    }
+
+    fn push(&self, task: Task) {
+        self.queue.borrow_mut().push_back(task);
+    }
+
+    fn pop(&self) -> Option<Task> {
+        self.queue.borrow_mut().pop_front()
+    }
 }
 
-impl<'a> IOCP<'a> {
+impl IOCP {
     pub fn new() -> Result<Self, String> {
         todo!()
     }
 
     pub fn run(&self) -> Result<(), String> {
         loop {
-            while let Some(mut task) = self.state.try_lock().unwrap().pending_tasks.pop_front() {
-                let waker = unsafe { Waker::from_raw(RawWaker::new(Rc::as_ptr(&task) as *const (), &TASK_WAKER_VTABLE)) };
+            while let Some(task) = self.pending_tasks.pop() {
+                let mut task = ManuallyDrop::new(Rc::new(task)); //This strong count will be dropped when the task is woken
+                let ptr = Weak::into_raw(Rc::downgrade(&task)); //This weak count will be dropped when the Waker is dropped
+                let waker =
+                    unsafe { Waker::from_raw(RawWaker::new(ptr as *const (), &TASK_WAKER_VTABLE)) };
                 let mut cx = Context::from_waker(&waker);
-                Rc::get_mut(&mut task).unwrap().future.as_mut().poll(&mut cx);
+
+                if let Poll::Ready(_) = Rc::get_mut(&mut task).unwrap().fut.as_mut().poll(&mut cx) {
+                    ManuallyDrop::into_inner(task); // Task completed, drop the Rc
+                }
             }
 
-            if self.state.try_lock().unwrap().ongoing_ios.len() > 0 {
+            let ongoing_ios = self.ongoing_ios.borrow_mut();
+            if ongoing_ios.len() > 0 {
                 use std::ptr::null_mut;
 
                 let mut len: DWORD = 0;
@@ -90,9 +108,19 @@ impl<'a> IOCP<'a> {
                     use winapi::um::ioapiset::GetQueuedCompletionStatus;
                     use winapi::um::winbase::INFINITE;
 
-                    GetQueuedCompletionStatus(self.handle, &mut len, &mut key, &mut overlapped, INFINITE)
-                } == 0 {
-                    return Err(format!("Failed to get completion state with error: {}", strerror(last_error())));
+                    GetQueuedCompletionStatus(
+                        self.handle,
+                        &mut len,
+                        &mut key,
+                        &mut overlapped,
+                        INFINITE,
+                    )
+                } == 0
+                {
+                    return Err(format!(
+                        "Failed to get completion state with error: {}",
+                        strerror(last_error())
+                    ));
                 }
 
                 todo!()
@@ -104,6 +132,7 @@ impl<'a> IOCP<'a> {
         Ok(())
     }
 
+    /*
     pub fn spawn(&'a self, fut: impl Future<Output = ()> + 'a) {
         self.pend(Rc::new(Task {
             future: Box::pin(fut),
@@ -111,50 +140,67 @@ impl<'a> IOCP<'a> {
         }));
     }
 
-    pub fn bind(&self, handle: HANDLE) -> Result<AsyncHandle<'a>, String> {
+    pub fn bind(&self, handle: HANDLE) -> Result<AsyncHandle<'b, 'a>, String> {
         todo!()
     }
 
-    fn pend(&self, task: Rc<Task<'a>>) {
+    fn pend(&self, task: Rc<Task<'b, 'a>>) {
         self.state.try_lock().unwrap().pending_tasks.push_back(task);
     }
 
     fn register_io(&self, overlapped: *const OVERLAPPED, waker: Waker) {
-        self.state.try_lock().unwrap().ongoing_ios.insert(overlapped, waker);
+        self.state
+            .try_lock()
+            .unwrap()
+            .ongoing_ios
+            .insert(overlapped, &waker);
     }
+    */
 }
 
 const TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     /* clone */
     |data| -> RawWaker {
-        // ManuallyDrop to not decrease ref cnt
-        let task = &*ManuallyDrop::new(unsafe { Rc::from_raw(data as *const Task) });
-        // ManuallyDrop a clone to increase ref cnt
-        let _ = ManuallyDrop::new(task.clone());
+        let task = &*ManuallyDrop::new(unsafe { Weak::from_raw(data as *const Task) });
+        let ptr = Weak::into_raw(task.clone()); //Weak cnt +1
 
-        RawWaker::new(data, &TASK_WAKER_VTABLE)
+        RawWaker::new(ptr as *const (), &TASK_WAKER_VTABLE)
     },
     /* wake */
     |data| {
-        // When this is dropped, the ref cnt will be decreased
-        let task = unsafe { Rc::from_raw(data as *const Task) };
+        let task = unsafe { Weak::from_raw(data as *const Task) };
 
-        task.iocp.pend(task.clone());
+        if let Some(task) = task.upgrade() {
+            assert!(Rc::strong_count(&task) == 2);
+            std::mem::drop(unsafe { Rc::from_raw(Rc::as_ptr(&task)) }); // Drop one strong count
+            if let Ok(task) = Rc::try_unwrap(task) {
+                task.queue.clone().push(task);
+            } else {
+                panic!();
+            }
+        }
     },
     /* wake_by_ref */
     |data| {
-        // ManuallyDrop to not decrease ref cnt
-        let task = &*ManuallyDrop::new(unsafe { Rc::from_raw(data as *const Task) });
+        let task = &*ManuallyDrop::new(unsafe { Weak::from_raw(data as *const Task) });
 
-        task.iocp.pend(task.clone());
+        if let Some(task) = task.upgrade() {
+            assert!(Rc::strong_count(&task) == 2);
+            std::mem::drop(unsafe { Rc::from_raw(Rc::as_ptr(&task)) }); // Drop one strong count
+            if let Ok(task) = Rc::try_unwrap(task) {
+                task.queue.clone().push(task);
+            } else {
+                panic!();
+            }
+        }
     },
     /* drop */
     |data| {
-        // When this is dropped, the ref cnt will be decreased
-        let _ = unsafe { Rc::from_raw(data as *const Task) };
+        let _ = unsafe { Weak::from_raw(data as *const Task) };
     },
 );
 
+/*
 impl<'b, 'a> Future for ReadFuture<'b, 'a>
 where
     'a: 'b,
@@ -162,7 +208,6 @@ where
     type Output = Result<usize, String>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-
         let mut ctx: &mut ReadContext = &mut self.ctx;
 
         match ctx.io.state {
@@ -176,7 +221,13 @@ where
                     use winapi::um::fileapi::ReadFile;
 
                     ctx.io.overlapped = std::mem::zeroed();
-                    ReadFile(ctx.io.handle.handle, ctx.buf.as_mut_ptr() as *mut c_void, ctx.buf.len() as u32, null_mut(), &mut ctx.io.overlapped)
+                    ReadFile(
+                        ctx.io.handle.handle,
+                        ctx.buf.as_mut_ptr() as *mut c_void,
+                        ctx.buf.len() as u32,
+                        null_mut(),
+                        &mut ctx.io.overlapped,
+                    )
                 } != 0
                 {
                     panic!("ReadFile returned non-zero");
@@ -190,29 +241,32 @@ where
                 } else {
                     ctx.io.state = IOState::Ongoing;
 
-                    ctx.io.handle.iocp.register_io(&ctx.io.overlapped, cx.waker().clone());
+                    ctx.io
+                        .handle
+                        .iocp
+                        .register_io(&ctx.io.overlapped, cx.waker().clone());
 
                     Poll::Pending
                 }
-            },
+            }
             IOState::Ongoing => Poll::Pending,
             IOState::Finished(ref rst) => Poll::Ready(rst.clone()),
         }
     }
 }
 
-impl<'a> AsyncHandle<'a> {
-    fn async_read<'b>(
-        &self,
-        ctx: Pin<&'b mut ReadContext<'b, 'a>>,
-    ) -> ReadFuture<'b, 'a>
+impl<'b, 'a> AsyncHandle<'b, 'a>
+where
+    'a: 'b,
+{
+    fn async_read(&self, ctx: Pin<&'b mut ReadContext<'b, 'a>>) -> ReadFuture<'b, 'a>
     where
         'a: 'b,
     {
         ReadFuture { ctx: ctx }
     }
 
-    pub async fn read(&self, buf: &mut [u8]) -> Result<usize, String> {
+    pub async fn read(&'a self, buf: &mut [u8]) -> Result<usize, String> {
         let mut ctx = ReadContext {
             io: IOContext {
                 handle: &self,
@@ -224,3 +278,4 @@ impl<'a> AsyncHandle<'a> {
         self.async_read(Pin::new(&mut ctx)).await
     }
 }
+*/
