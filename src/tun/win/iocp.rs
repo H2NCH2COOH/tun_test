@@ -53,13 +53,14 @@ where
     state: IOState,
 }
 
-struct ReadContext<'io, 'handle> {
-    io: IOContext<'io, 'handle>,
-    buf: &'io mut [u8],
+struct ReadFuture<'io, 'handle> {
+    ctx: Pin<&'io mut IOContext<'io, 'handle>>,
+    buf: Pin<&'io mut [u8]>,
 }
 
-struct ReadFuture<'io, 'handle> {
-    ctx: Pin<&'io mut ReadContext<'io, 'handle>>,
+struct WriteFuture<'io, 'handle> {
+    ctx: Pin<&'io mut IOContext<'io, 'handle>>,
+    buf: Pin<&'io [u8]>,
 }
 
 impl TaskQueue {
@@ -200,14 +201,28 @@ const TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     },
 );
 
-/*
-impl<'b, 'a> Future for ReadFuture<'b, 'a>
-where
-    'a: 'b,
-{
+impl<'io, 'handle> IOContext<'io, 'handle> {
+    fn read(self: Pin<&'io mut Self>, buf: Pin<&'io mut [u8]>) -> ReadFuture<'io, 'handle> {
+        ReadFuture {
+            ctx: self,
+            buf: buf,
+        }
+    }
+
+    fn write(self: Pin<&'io mut Self>, buf: Pin<&'io [u8]>) -> WriteFuture<'io, 'handle> {
+        WriteFuture {
+            ctx: self,
+            buf: buf,
+        }
+    }
+}
+
+impl<'io, 'handle> Future for ReadFuture<'io, 'handle> {
     type Output = Result<usize, String>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        todo!()
+        /*
         let mut ctx: &mut ReadContext = &mut self.ctx;
 
         match ctx.io.state {
@@ -252,30 +267,34 @@ where
             IOState::Ongoing => Poll::Pending,
             IOState::Finished(ref rst) => Poll::Ready(rst.clone()),
         }
+    */
     }
 }
 
-impl<'b, 'a> AsyncHandle<'b, 'a>
-where
-    'a: 'b,
-{
-    fn async_read(&self, ctx: Pin<&'b mut ReadContext<'b, 'a>>) -> ReadFuture<'b, 'a>
-    where
-        'a: 'b,
-    {
-        ReadFuture { ctx: ctx }
-    }
+impl<'io, 'handle> Future for WriteFuture<'io, 'handle> {
+    type Output = Result<usize, String>;
 
-    pub async fn read(&'a self, buf: &mut [u8]) -> Result<usize, String> {
-        let mut ctx = ReadContext {
-            io: IOContext {
-                handle: &self,
-                overlapped: unsafe { std::mem::zeroed() },
-                state: IOState::Init,
-            },
-            buf: buf,
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        todo!()
+    }
+}
+
+impl<'handle> AsyncHandle<'handle> {
+    pub async fn read<'io> (&'io self, buf: &'io mut [u8]) -> Result<usize, String> {
+        let mut ctx = IOContext {
+            handle: self,
+            overlapped: unsafe { std::mem::zeroed() },
+            state: IOState::Init,
         };
-        self.async_read(Pin::new(&mut ctx)).await
+        Pin::new(&mut ctx).read(Pin::new(buf)).await
+    }
+
+    pub async fn write<'io> (&'io self, buf: &'io [u8]) -> Result<usize, String> {
+        let mut ctx = IOContext {
+            handle: self,
+            overlapped: unsafe { std::mem::zeroed() },
+            state: IOState::Init,
+        };
+        Pin::new(&mut ctx).write(Pin::new(buf)).await
     }
 }
-*/
