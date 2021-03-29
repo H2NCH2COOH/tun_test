@@ -98,7 +98,7 @@ impl IOCP {
                 }
             }
 
-            let ongoing_ios = self.ongoing_ios.borrow_mut();
+            let mut ongoing_ios = self.ongoing_ios.borrow_mut();
             if ongoing_ios.len() > 0 {
                 use std::ptr::null_mut;
 
@@ -124,7 +124,15 @@ impl IOCP {
                     ));
                 }
 
-                todo!()
+                if let Some((state, waker)) = ongoing_ios.remove(&(overlapped as *const OVERLAPPED))
+                {
+                    // The state ptr will be valid since it will be removed from the map before
+                    // dropped
+                    unsafe {
+                        *(state as *mut IOState) = IOState::Finished(Ok(len as usize));
+                    }
+                    waker.wake();
+                }
             } else {
                 break;
             }
@@ -133,30 +141,21 @@ impl IOCP {
         Ok(())
     }
 
-    /*
-    pub fn spawn(&'a self, fut: impl Future<Output = ()> + 'a) {
-        self.pend(Rc::new(Task {
-            future: Box::pin(fut),
-            iocp: &self,
-        }));
-    }
-
-    pub fn bind(&self, handle: HANDLE) -> Result<AsyncHandle<'b, 'a>, String> {
+    pub fn spawn(&self, fut: impl Future<Output = ()> + 'static) {
         todo!()
     }
 
-    fn pend(&self, task: Rc<Task<'b, 'a>>) {
-        self.state.try_lock().unwrap().pending_tasks.push_back(task);
+    pub fn bind(&self, handle: HANDLE) -> Result<AsyncHandle, String> {
+        todo!()
     }
 
-    fn register_io(&self, overlapped: *const OVERLAPPED, waker: Waker) {
-        self.state
-            .try_lock()
-            .unwrap()
-            .ongoing_ios
-            .insert(overlapped, &waker);
+    fn register_io(&self, overlapped: *const OVERLAPPED, io_state: *const IOState, waker: Waker) {
+        todo!()
     }
-    */
+
+    fn unregister_io(&self, overlapped: *const OVERLAPPED) {
+        todo!()
+    }
 }
 
 const TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -215,59 +214,96 @@ impl<'io, 'handle> IOContext<'io, 'handle> {
             buf: buf,
         }
     }
+
+    fn abort(self: &mut Pin<&'io mut Self>) {
+        /*
+         * Cancel the IO
+         */
+        if let IOState::Ongoing = self.state {
+            if unsafe {
+                use winapi::um::ioapiset::CancelIoEx;
+                CancelIoEx(self.handle.handle, &mut self.overlapped)
+            } == 0
+            {
+                panic!("CancelIoEx failed with error: {}", strerror(last_error()));
+            }
+
+            if unsafe {
+                use winapi::um::ioapiset::GetOverlappedResult;
+                let mut _d: DWORD = 0;
+                GetOverlappedResult(self.handle.handle, &mut self.overlapped, &mut _d, 1)
+            } == 0
+            {
+                panic!(
+                    "GetOverlappedResult failed with error: {}",
+                    strerror(last_error())
+                );
+            }
+
+            self.handle.iocp.unregister_io(&self.overlapped);
+            self.state = IOState::Finished(Err("Aborted".to_owned()));
+        }
+    }
+}
+
+impl<'io, 'handle> Drop for ReadFuture<'io, 'handle> {
+    fn drop(&mut self) {
+        self.ctx.abort();
+    }
+}
+
+impl<'io, 'handle> Drop for WriteFuture<'io, 'handle> {
+    fn drop(&mut self) {
+        self.ctx.abort();
+    }
 }
 
 impl<'io, 'handle> Future for ReadFuture<'io, 'handle> {
     type Output = Result<usize, String>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
-        /*
-        let mut ctx: &mut ReadContext = &mut self.ctx;
-
-        match ctx.io.state {
+        match self.ctx.state {
             IOState::Init => {
                 use winapi::shared::winerror::ERROR_IO_PENDING;
 
                 // Start the read
-                if unsafe {
+                let ret = unsafe {
                     use std::ffi::c_void;
                     use std::ptr::null_mut;
                     use winapi::um::fileapi::ReadFile;
 
-                    ctx.io.overlapped = std::mem::zeroed();
+                    // Assume overlapped is zeroed
                     ReadFile(
-                        ctx.io.handle.handle,
-                        ctx.buf.as_mut_ptr() as *mut c_void,
-                        ctx.buf.len() as u32,
+                        self.ctx.handle.handle,
+                        self.buf.as_mut_ptr() as *mut c_void,
+                        self.buf.len() as u32,
                         null_mut(),
-                        &mut ctx.io.overlapped,
+                        &mut self.ctx.overlapped,
                     )
-                } != 0
-                {
-                    panic!("ReadFile returned non-zero");
+                };
+                let err = last_error();
+
+                if ret != 0 {
+                    panic!("ReadFile returned non-zero with error: {}", strerror(err));
                 }
 
-                let err = last_error();
                 if err != ERROR_IO_PENDING {
                     let rst = Err(format!("Failed to read with error: {}", strerror(err)));
-                    ctx.io.state = IOState::Finished(rst.clone());
+                    self.ctx.state = IOState::Finished(rst.clone());
                     Poll::Ready(rst)
                 } else {
-                    ctx.io.state = IOState::Ongoing;
-
-                    ctx.io
-                        .handle
-                        .iocp
-                        .register_io(&ctx.io.overlapped, cx.waker().clone());
-
+                    self.ctx.state = IOState::Ongoing;
+                    self.ctx.handle.iocp.register_io(
+                        &self.ctx.overlapped,
+                        &self.ctx.state,
+                        cx.waker().clone(),
+                    );
                     Poll::Pending
                 }
             }
             IOState::Ongoing => Poll::Pending,
             IOState::Finished(ref rst) => Poll::Ready(rst.clone()),
         }
-    */
     }
 }
 
@@ -275,12 +311,53 @@ impl<'io, 'handle> Future for WriteFuture<'io, 'handle> {
     type Output = Result<usize, String>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
+        match self.ctx.state {
+            IOState::Init => {
+                use winapi::shared::winerror::ERROR_IO_PENDING;
+
+                // Start the write
+                let ret = unsafe {
+                    use std::ffi::c_void;
+                    use std::ptr::null_mut;
+                    use winapi::um::fileapi::WriteFile;
+
+                    // Assume overlapped is zeroed
+                    WriteFile(
+                        self.ctx.handle.handle,
+                        self.buf.as_ptr() as *const c_void,
+                        self.buf.len() as u32,
+                        null_mut(),
+                        &mut self.ctx.overlapped,
+                    )
+                };
+                let err = last_error();
+
+                if ret != 0 {
+                    panic!("WriteFile returned non-zero with error: {}", strerror(err));
+                }
+
+                if err != ERROR_IO_PENDING {
+                    let rst = Err(format!("Failed to write with error: {}", strerror(err)));
+                    self.ctx.state = IOState::Finished(rst.clone());
+                    Poll::Ready(rst)
+                } else {
+                    self.ctx.state = IOState::Ongoing;
+                    self.ctx.handle.iocp.register_io(
+                        &self.ctx.overlapped,
+                        &self.ctx.state,
+                        cx.waker().clone(),
+                    );
+                    Poll::Pending
+                }
+            }
+            IOState::Ongoing => Poll::Pending,
+            IOState::Finished(ref rst) => Poll::Ready(rst.clone()),
+        }
     }
 }
 
 impl<'handle> AsyncHandle<'handle> {
-    pub async fn read<'io> (&'io self, buf: &'io mut [u8]) -> Result<usize, String> {
+    pub async fn read<'io>(&'io self, buf: &'io mut [u8]) -> Result<usize, String> {
         let mut ctx = IOContext {
             handle: self,
             overlapped: unsafe { std::mem::zeroed() },
@@ -289,7 +366,7 @@ impl<'handle> AsyncHandle<'handle> {
         Pin::new(&mut ctx).read(Pin::new(buf)).await
     }
 
-    pub async fn write<'io> (&'io self, buf: &'io [u8]) -> Result<usize, String> {
+    pub async fn write<'io>(&'io self, buf: &'io [u8]) -> Result<usize, String> {
         let mut ctx = IOContext {
             handle: self,
             overlapped: unsafe { std::mem::zeroed() },
